@@ -111,6 +111,35 @@ async function verifyAndDescribeTransaction(reference) {
   };
 }
 
+
+/**
+ * Whether card payment is actually on.
+ *
+ * A live secret key, and nothing else, counts. A test key takes fake money:
+ * on a real hotel's site it would show a guest a receipt for a payment that
+ * never happened, and the desk would find out at checkout. So an unset key, a
+ * placeholder, and sk_test_ all read as off, and the option is not offered to
+ * anybody rather than offered and failing.
+ *
+ * PAYSTACK_ENABLED=1 forces it on for a staging environment that means to use
+ * a test key deliberately. It is an override, not the normal path.
+ */
+function paystackReady() {
+  const key = String(process.env.PAYSTACK_SECRET_KEY || "").trim();
+  const forced = /^(1|true|yes)$/i.test(String(process.env.PAYSTACK_ENABLED || ""));
+  if (forced) return Boolean(key);
+  return key.startsWith("sk_live_");
+}
+
+/** Why it is off, in words a manager can act on. */
+function paystackOffReason() {
+  const key = String(process.env.PAYSTACK_SECRET_KEY || "").trim();
+  if (!key) return "No Paystack key is set on the server yet.";
+  if (key.startsWith("sk_test_")) return "The server is on a Paystack test key, which cannot take real money.";
+  return "Paystack is not set up on this server yet.";
+}
+
 module.exports = {
   verifyTransaction, verifyAndDescribeTransaction, initializeTransaction, paystackRequest, verifyWebhookSignature,
+  paystackReady, paystackOffReason,
 };
