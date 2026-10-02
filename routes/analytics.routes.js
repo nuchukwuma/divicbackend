@@ -8,6 +8,7 @@ const { foliosFor } = require("../services/folio");
 const { requireAuth, requireRole, scopeLocation } = require("../middleware/auth");
 const { LOCATIONS } = require("../utils/constants");
 const ReportExport = require("../models/ReportExport");
+const User = require("../models/User");
 const { windowFor, nightsIn, combine, periodsDue, MONTHS } = require("../services/report");
 
 // Revenue and analytics are manager and owner only. Receptionists never see them.
@@ -16,7 +17,7 @@ router.use(requireAuth, requireRole("manager", "owner"));
 // The hotel's day, not UTC's — see utils/day.js. Lagos is an hour ahead, so
 // a day computed in UTC rolls over at 1am and "today's sales" spends that hour
 // reporting yesterday's.
-const { today, dayStart, dayEnd, shiftDays: shift } = require("../utils/day");
+const { today, dayOf, dayStart, dayEnd, shiftDays: shift } = require("../utils/day");
 
 /**
  * Facility takings over a period, broken down by facility.
@@ -426,10 +427,30 @@ router.get("/report", async (req, res, next) => {
  * nobody looks; a prompt that appears on its own is the difference between a
  * record that gets filed every month and one that gets filed the first month.
  */
+/**
+ * The day this hotel's records begin.
+ *
+ * The month-end prompt is anchored to it so a freshly deployed system is never
+ * told it owes itself last year's accounts. The first booking is the honest
+ * answer; before there is one, the first account created is when somebody
+ * started using this at all.
+ */
+async function recordsBeganOn() {
+  const [booking, account] = await Promise.all([
+    Booking.findOne().sort({ createdAt: 1 }).select("createdAt").lean(),
+    User.findOne().sort({ createdAt: 1 }).select("createdAt").lean(),
+  ]);
+  const first = booking?.createdAt || account?.createdAt;
+  return first ? dayOf(first) : today();
+}
+
 router.get("/report/due", async (req, res, next) => {
   try {
-    const taken = await ReportExport.find({ user: req.user.id }).select("kind period").lean();
-    res.json({ due: periodsDue(today(), taken) });
+    const [taken, since] = await Promise.all([
+      ReportExport.find({ user: req.user.id }).select("kind period").lean(),
+      recordsBeganOn(),
+    ]);
+    res.json({ due: periodsDue(today(), taken, since) });
   } catch (e) { next(e); }
 });
 
@@ -455,8 +476,11 @@ router.post("/report/due", async (req, res, next) => {
       { $setOnInsert: { at: new Date() } },
       { upsert: true }
     );
-    const taken = await ReportExport.find({ user: req.user.id }).select("kind period").lean();
-    res.json({ due: periodsDue(today(), taken) });
+    const [taken, since] = await Promise.all([
+      ReportExport.find({ user: req.user.id }).select("kind period").lean(),
+      recordsBeganOn(),
+    ]);
+    res.json({ due: periodsDue(today(), taken, since) });
   } catch (e) { next(e); }
 });
 

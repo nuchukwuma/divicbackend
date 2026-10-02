@@ -5,8 +5,9 @@ const { requireAuth, requireRole } = require("../middleware/auth");
 const { logAction } = require("../services/audit");
 const { ROLES } = require("../utils/constants");
 const Shift = require("../models/Shift");
+const AuditLog = require("../models/AuditLog");
 const ShiftTimes = require("../models/ShiftTimes");
-const { badRoster, badTimes, cleanRoster, onRosterAt, windowsFor, DEFAULT_TIMES } = require("../services/roster");
+const { badRoster, badTimes, cleanRoster, onRosterAt, shiftsOn, windowsFor, DEFAULT_TIMES } = require("../services/roster");
 const { endShift, timesFor } = require("../services/shifts");
 const { dayStart, dayEnd, today, shiftDays } = require("../utils/day");
 
@@ -47,6 +48,9 @@ router.get("/", async (req, res, next) => {
   try {
     // A manager cannot see or touch owner accounts.
     const filter = req.user.role === "owner" ? {} : { role: { $ne: "owner" } };
+    // People who have left are off the list unless somebody asks for them —
+    // their records are kept so the history they made still has a name on it.
+    if (req.query.includeRemoved !== "1") filter.removedAt = { $exists: false };
     const users = await User.find(filter).sort({ name: 1 });
 
     // Who is actually signed on, in one query rather than one per person.
@@ -77,6 +81,10 @@ router.get("/", async (req, res, next) => {
         dueOn: roster.on,
         dueShift: roster.shift,
         dueWindow: roster.window ? roster.window.startsAt + "–" + roster.window.endsAt : null,
+        // What the whole of today asks of them. Two entries is a double, and a
+        // manager reading the board needs to see that before somebody has been
+        // there sixteen hours.
+        dueToday: shiftsOn(u.shifts, now),
       };
     }));
   } catch (e) { next(e); }
@@ -121,7 +129,9 @@ router.post("/", async (req, res, next) => {
 
     logAction(req, {
       action: "Created a " + role + " account for " + name +
-        (user.shifts.length ? " on a " + user.shifts.length + "-day roster" : " with no shifts set"),
+        (user.shifts.length
+          ? " on a roster of " + user.shifts.length + " shift" + (user.shifts.length === 1 ? "" : "s")
+          : " with no shifts set"),
       entity: "User", entityId: user._id,
     });
     res.status(201).json(user.toSafeJSON());
@@ -162,6 +172,79 @@ router.post("/:id/unlock-login", async (req, res, next) => {
         loginLockedAt: null,
         loginUnlockedAt: user.loginUnlockedAt,
       },
+    });
+  } catch (e) { next(e); }
+});
+
+/**
+ * DELETE /api/staff/:id — somebody has left.
+ *
+ * Two outcomes, and which one you get depends on whether the account ever did
+ * anything. An account created by mistake ten minutes ago is deleted outright.
+ * An account that has signed in, worked a shift, taken a payment or changed a
+ * booking is kept and marked as gone: nineteen collections carry its id, and
+ * deleting the row would quietly turn every payment it took and every booking
+ * it made into "somebody". That is not a tidier system, it is a system that
+ * cannot answer who did this.
+ *
+ * Either way it leaves the staff list, cannot sign in, and its shift is closed.
+ */
+router.delete("/:id", async (req, res, next) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: "That account does not exist." });
+    if (user.removedAt) return res.status(409).json({ error: user.name + " has already been removed." });
+
+    if (String(user._id) === String(req.user.id || req.user._id)) {
+      return res.status(400).json({ error: "You cannot remove your own account." });
+    }
+    if (req.user.role === "manager" && user.role === "owner") {
+      return res.status(403).json({ error: "Only the owner can remove an owner account." });
+    }
+    // The last way into the system is not something one click should be able
+    // to close.
+    if (user.role === "owner") {
+      const owners = await User.countDocuments({
+        role: "owner", active: true, removedAt: { $exists: false }, _id: { $ne: user._id },
+      });
+      if (!owners) {
+        return res.status(400).json({ error: "This is the last owner account. Make somebody else an owner first." });
+      }
+    }
+
+    // Every write in this system goes through the audit log, so an account
+    // with no audit entry, no shift and no sign-in has touched nothing and
+    // nothing can be pointing at it.
+    const [entries, shifts] = await Promise.all([
+      AuditLog.countDocuments({ user: user._id }),
+      Shift.countDocuments({ user: user._id }),
+    ]);
+    const hasHistory = Boolean(entries || shifts || user.lastLoginAt);
+
+    // Going home is implied by leaving. An open shift left running would sit
+    // on the board forever.
+    await endShift(user._id, req.user.id || req.user._id);
+
+    if (hasHistory) {
+      user.active = false;
+      user.removedAt = new Date();
+      await user.save();
+    } else {
+      await User.deleteOne({ _id: user._id });
+    }
+
+    logAction(req, {
+      action: "Removed " + user.name + "'s account" +
+        (hasHistory ? " — kept on record, they had history" : " — deleted, it had no history"),
+      entity: "User", entityId: user._id, location: user.location,
+    });
+
+    res.json({
+      ok: true,
+      deleted: !hasHistory,
+      message: hasHistory
+        ? user.name + " has been removed from the staff list. Their record is kept so everything they did still has their name on it."
+        : user.name + "'s account had no history and has been deleted outright.",
     });
   } catch (e) { next(e); }
 });

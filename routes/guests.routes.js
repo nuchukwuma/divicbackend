@@ -3,6 +3,7 @@ const Guest = require("../models/Guest");
 const Booking = require("../models/Booking");
 const { requireAuth, requireModule } = require("../middleware/auth");
 const { logAction } = require("../services/audit");
+const { TZ } = require("../utils/day");
 
 router.use(requireAuth, requireModule("guests"));
 
@@ -13,31 +14,86 @@ router.use(requireAuth, requireModule("guests"));
 // event loop for every other user on this single-threaded process.
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/**
+ * The guest list.
+ *
+ * Ordered by who was here last, not alphabetically. A guest record is kept
+ * forever and nothing ever deletes one, but an A–Z list capped at a hundred
+ * behaves as though it does: the person the desk dealt with last night is
+ * somewhere in the middle of the alphabet, past the cap, and the only way to
+ * reach them is to already know their name and search for it. From the desk
+ * that reads as the records having been wiped overnight — and worse, a
+ * returning guest who cannot be found gets typed in again as a new one.
+ *
+ * So: most recent stay first, a total so the list says how much it is not
+ * showing, and a skip so the rest can actually be reached.
+ */
 router.get("/", async (req, res, next) => {
   try {
-    const { q, limit = 100 } = req.query;
+    const { q } = req.query;
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 300);
+    const skip = Math.max(Number(req.query.skip) || 0, 0);
+    const byName = req.query.sort === "name";
+
     const needle = q ? new RegExp(escapeRegex(String(q).trim()), "i") : null;
     const filter = needle
       ? { $or: [{ name: needle }, { phone: needle }, { email: needle }] }
       : {};
-    const guests = await Guest.find(filter).sort({ name: 1 }).limit(Math.min(Number(limit), 300)).lean();
 
-    const stats = await Booking.aggregate([
-      { $match: { guest: { $in: guests.map((g) => g._id) }, status: { $ne: "cancelled" } } },
-      { $group: { _id: "$guest", stays: { $sum: 1 }, nights: { $sum: "$nights" },
-                  spend: { $sum: "$totalCharge" }, lastStay: { $max: "$checkIn" },
-                  properties: { $addToSet: "$location" } } },
+    const total = await Guest.countDocuments(filter);
+
+    const guests = await Guest.aggregate([
+      { $match: filter },
+      // Each guest's history, joined here rather than in a second query,
+      // because the list is ordered by it and a page cannot be chosen before
+      // the order is known.
+      {
+        $lookup: {
+          from: Booking.collection.name,
+          let: { gid: "$_id" },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$guest", "$$gid"] }, status: { $ne: "cancelled" } } },
+            {
+              $group: {
+                _id: null,
+                stays: { $sum: 1 }, nights: { $sum: "$nights" },
+                spend: { $sum: "$totalCharge" }, lastStay: { $max: "$checkIn" },
+                properties: { $addToSet: "$location" },
+              },
+            },
+          ],
+          as: "history",
+        },
+      },
+      {
+        $addFields: {
+          stays: { $ifNull: [{ $arrayElemAt: ["$history.stays", 0] }, 0] },
+          nights: { $ifNull: [{ $arrayElemAt: ["$history.nights", 0] }, 0] },
+          spend: { $ifNull: [{ $arrayElemAt: ["$history.spend", 0] }, 0] },
+          lastStay: { $ifNull: [{ $arrayElemAt: ["$history.lastStay", 0] }, null] },
+          properties: { $ifNull: [{ $arrayElemAt: ["$history.properties", 0] }, []] },
+        },
+      },
+      {
+        // Somebody added at the desk this morning has no stay yet and must not
+        // sink to the bottom of a list headed "most recent" — their record was
+        // made a minute ago, so that date stands in.
+        $addFields: {
+          recency: {
+            $ifNull: [
+              "$lastStay",
+              { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: TZ } },
+            ],
+          },
+        },
+      },
+      { $project: { history: 0 } },
+      { $sort: byName ? { name: 1, _id: 1 } : { recency: -1, createdAt: -1, _id: 1 } },
+      { $skip: skip },
+      { $limit: limit },
     ]);
-    const by = Object.fromEntries(stats.map((s) => [String(s._id), s]));
 
-    res.json(guests.map((g) => ({
-      ...g,
-      stays: by[String(g._id)]?.stays || 0,
-      nights: by[String(g._id)]?.nights || 0,
-      spend: by[String(g._id)]?.spend || 0,
-      lastStay: by[String(g._id)]?.lastStay || null,
-      properties: by[String(g._id)]?.properties || [],
-    })));
+    res.json({ guests, total, hasMore: skip + guests.length < total });
   } catch (e) { next(e); }
 });
 

@@ -64,6 +64,35 @@ const s = splitSettlement(197150, 195000);
 check("settlement split keeps the fee out of revenue",
   s.netAmount === 195000 && s.feeAmount === 2150, "net " + s.netAmount + ", fee " + s.feeAmount);
 
+console.log("\n=== Card payment is off until a live key is set ===");
+{
+  const { paystackReady, paystackOffReason } = require("../services/paystack");
+  const key = process.env.PAYSTACK_SECRET_KEY;
+  const flag = process.env.PAYSTACK_ENABLED;
+  const withEnv = (k, f) => {
+    process.env.PAYSTACK_SECRET_KEY = k === null ? "" : k;
+    if (f === undefined) delete process.env.PAYSTACK_ENABLED; else process.env.PAYSTACK_ENABLED = f;
+    const out = { ready: paystackReady(), reason: paystackOffReason() };
+    return out;
+  };
+
+  // A test key takes fake money. Offering it on a live site would show a guest
+  // a receipt for a payment that never happened, and the desk would find out
+  // at checkout — so it counts as off, not as on.
+  check("a test key is not good enough", withEnv("sk_test_abc").ready === false);
+  check("...and it says why", /test key/i.test(withEnv("sk_test_abc").reason));
+  check("no key at all is off", withEnv(null).ready === false);
+  check("...and it says why", /no paystack key/i.test(withEnv(null).reason));
+  check("a live key turns it on", withEnv("sk_live_abc").ready === true);
+  check("whitespace around a live key does not fool it", withEnv("  sk_live_abc  ").ready === true);
+  // Staging sometimes means to use a test key. That has to be deliberate.
+  check("the override turns a test key on", withEnv("sk_test_abc", "1").ready === true);
+  check("the override cannot conjure a key from nothing", withEnv(null, "1").ready === false);
+
+  process.env.PAYSTACK_SECRET_KEY = key;
+  if (flag === undefined) delete process.env.PAYSTACK_ENABLED; else process.env.PAYSTACK_ENABLED = flag;
+}
+
 console.log("\n=== Webhook signature ===");
 const { verifyWebhookSignature } = require("../services/paystack");
 const body = Buffer.from(JSON.stringify({ event: "charge.success", data: { reference: "X" } }));

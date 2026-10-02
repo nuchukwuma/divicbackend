@@ -26,7 +26,7 @@ const FacilityVisit = require("../models/FacilityVisit");
 const Membership = require("../models/Membership");
 const ShiftModel = require("../models/Shift");
 const ShiftTimes = require("../models/ShiftTimes");
-const { onRosterAt, windowsFor, DEFAULT_TIMES } = require("./roster");
+const { onRosterAt, shiftsOn, windowsFor, DEFAULT_TIMES } = require("./roster");
 const { priceStay, liveDiscounts, publicDiscount } = require("./pricing");
 const { LOCATIONS } = require("../utils/constants");
 const { findAvailableRooms, nightsBetween } = require("./availability");
@@ -680,6 +680,9 @@ async function shiftBoard(location) {
       onShiftFor: shift ? Math.round((now - new Date(shift.startedAt)) / 60000) + " minutes" : null,
       dueOn: roster.on,
       dueShift: roster.shift || null,
+      // Sixteen hours in a row is the answer to "who has been here too long",
+      // and the assistant cannot work it out from dueShift alone.
+      dueToday: shiftsOn(u.shifts, now),
     };
   });
 
@@ -691,6 +694,7 @@ async function shiftBoard(location) {
     // The two questions worth asking of this board.
     dueButNotSignedIn: people.filter((p) => p.dueOn && !p.onShift).map((p) => p.name),
     signedInButNotDue: people.filter((p) => p.onShift && !p.dueOn).map((p) => p.name),
+    onADoubleToday: people.filter((p) => p.dueToday.length === 2).map((p) => p.name),
     people,
   };
 }

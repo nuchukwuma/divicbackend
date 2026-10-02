@@ -146,15 +146,24 @@ function combine(reports) {
  * reads, and any period at all can still be pulled by hand whenever it is
  * wanted. The point is the one at the top of the list — the month that just
  * ended, while it is still the thing on everyone's mind.
+ *
+ * `since` is the day this system started holding records. Nothing that closed
+ * before it is ever due: a hotel that went live in September is not behind on
+ * last year's accounts, and being told on the first morning that it owes itself
+ * a copy of a year it has no figures for teaches everyone to dismiss the prompt
+ * — which costs the one month it exists for.
  */
-function periodsDue(todayIso, alreadyTaken = []) {
+function periodsDue(todayIso, alreadyTaken = [], since = null) {
   const taken = new Set(alreadyTaken.map((t) => t.kind + ":" + t.period));
   const [y, m] = todayIso.split("-").map(Number);
+  const sinceMonth = since ? String(since).slice(0, 7) : null;   // "2026-09"
+  const sinceYear = sinceMonth ? Number(sinceMonth.slice(0, 4)) : null;
   const due = [];
 
   // The year, first: it is the bigger document and the easier one to forget.
   const lastYear = y - 1;
-  if (lastYear >= 2000 && !taken.has("year:" + lastYear)) {
+  if (lastYear >= 2000 && !taken.has("year:" + lastYear) &&
+      (sinceYear === null || lastYear >= sinceYear)) {
     due.push({ kind: "year", period: String(lastYear), label: String(lastYear) });
   }
 
@@ -164,6 +173,7 @@ function periodsDue(todayIso, alreadyTaken = []) {
     while (mm < 1) { mm += 12; yy -= 1; }
     const period = yy + "-" + String(mm).padStart(2, "0");
     if (taken.has("month:" + period)) continue;
+    if (sinceMonth && period < sinceMonth) continue;
     due.push({ kind: "month", period, label: MONTHS[mm - 1] + " " + yy });
   }
 

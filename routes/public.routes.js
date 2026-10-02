@@ -7,7 +7,7 @@ const { priceStay, liveDiscounts, publicDiscount } = require("../services/pricin
 const Facility = require("../models/Facility");
 const { availabilityByType, validRange, nightsBetween } = require("../services/availability");
 const { LOCATIONS, ROOM_PLAN } = require("../utils/constants");
-const { verifyTransaction, initializeTransaction } = require("../services/paystack");
+const { verifyTransaction, initializeTransaction, paystackReady, paystackOffReason } = require("../services/paystack");
 const { grossUp, splitSettlement, FEE_CONFIG } = require("../services/paystackFees");
 const SiteContent = require("../models/SiteContent");
 const FaqEntry = require("../models/FaqEntry");
@@ -353,6 +353,28 @@ router.get("/quote", quoteLimiter, async (req, res, next) => {
  * from the browser, or anyone could book a crown suite for one naira by editing
  * the request in dev tools.
  */
+/**
+ * GET /api/public/payment-options
+ *
+ * What this hotel can actually take money through right now. Read by the
+ * website and by the desk, so neither has to be redeployed when a key lands or
+ * is pulled — one server restart with the key set and the card option comes
+ * back on its own, everywhere.
+ *
+ * Unauthenticated on purpose: it says nothing a guest on the booking page is
+ * not about to be shown anyway, and the desk needs it before anyone signs in.
+ */
+router.get("/payment-options", (_req, res) => {
+  const online = paystackReady();
+  res.json({
+    online,
+    // Always available: the desk can take a transfer or cash whatever the card
+    // situation is, so there is never no way to pay.
+    offline: true,
+    reason: online ? null : paystackOffReason(),
+  });
+});
+
 router.post("/booking-requests/:reference/pay", requestLimiter, async (req, res, next) => {
   try {
     const doc = await BookingRequest.findOne({ reference: String(req.params.reference).toUpperCase() });
@@ -362,6 +384,15 @@ router.post("/booking-requests/:reference/pay", requestLimiter, async (req, res,
     }
     if (["declined", "expired"].includes(doc.status)) {
       return res.status(409).json({ error: "This request is no longer open. Please start a new booking." });
+    }
+
+    // Nothing should reach here while card payment is off — the website hides
+    // the button — but a stale tab or a direct POST must not start a payment
+    // the server cannot honour.
+    if (!paystackReady()) {
+      return res.status(503).json({
+        error: "Card payment is not available at the moment. Please pay by transfer, or call the hotel and the desk will take it.",
+      });
     }
 
     const quote = grossUp(doc.quotedTotal);

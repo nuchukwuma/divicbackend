@@ -2,7 +2,7 @@ const router = require("express").Router();
 const Payment = require("../models/Payment");
 const Booking = require("../models/Booking");
 const { requireAuth, requireModule, requireRole, requireOperational, scopeLocation } = require("../middleware/auth");
-const { verifyTransaction, initializeTransaction } = require("../services/paystack");
+const { verifyTransaction, initializeTransaction, paystackReady, paystackOffReason } = require("../services/paystack");
 const { logAction } = require("../services/audit");
 const { foliosFor, facilityChargeLines } = require("../services/folio");
 
@@ -127,6 +127,12 @@ router.post("/paystack/initialize", async (req, res, next) => {
     if (!booking) return res.status(404).json({ error: "That booking does not exist." });
     if (req.user.location !== "all" && booking.location !== req.user.location) {
       return res.status(403).json({ error: "You can only work on your own property." });
+    }
+    if (!paystackReady()) {
+      return res.status(503).json({
+        error: "Card payment is not switched on yet — " + paystackOffReason().toLowerCase() +
+          " Take this one as cash, transfer or on the card machine.",
+      });
     }
     if (!Number.isFinite(amount) || amount <= 0) {
       return res.status(400).json({ error: "Enter an amount greater than zero." });

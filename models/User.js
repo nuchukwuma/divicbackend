@@ -41,6 +41,12 @@ const userSchema = new mongoose.Schema(
     }],
 
     active: { type: Boolean, default: true },
+    /* Somebody who has left. Set instead of deleting the record when the
+       account has history — an audit entry, a shift, a payment taken — because
+       nineteen collections point at this id and deleting it would turn every
+       one of those into "somebody". A removed account is gone from the staff
+       list, cannot sign in, and can still be named by the records it made. */
+    removedAt: Date,
     lastLoginAt: Date,
 
     // Set the first time this account dismisses or finishes the guided tour.
@@ -71,6 +77,7 @@ userSchema.methods.toSafeJSON = function () {
   return {
     id: this._id, name: this.name, username: this.username, role: this.role,
     location: this.location, phone: this.phone, active: this.active,
+    removedAt: this.removedAt || null,
     assignedFacilities: (this.assignedFacilities || []).map(String),
     shifts: (this.shifts || []).map((s) => ({ day: s.day, shift: s.shift })),
     tourSeenAt: this.tourSeenAt || null,

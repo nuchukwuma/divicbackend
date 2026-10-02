@@ -30,12 +30,18 @@ const openShiftFor = (userId) =>
  */
 async function startShift(user) {
   const existing = await openShiftFor(user._id);
-  if (existing) return { shift: existing, opened: false };
+  if (existing) {
+    // Still the same shift, but the caller wants to know what the roster says
+    // now, not what it said when the shift opened.
+    const times = await timesFor(user.location);
+    return { shift: existing, opened: false, roster: onRosterAt(user.shifts, times, new Date()) };
+  }
 
   // What the roster said right now, written down while it is still true. A
   // manager editing the roster next week must not change what today looked like.
   const times = await timesFor(user.location);
-  const { on, shift: which, window } = onRosterAt(user.shifts, times, new Date());
+  const roster = onRosterAt(user.shifts, times, new Date());
+  const { on, shift: which, window } = roster;
 
   const shift = await Shift.create({
     user: user._id,
@@ -46,7 +52,7 @@ async function startShift(user) {
     rosteredStart: window?.startsAt,
     rosteredEnd: window?.endsAt,
   });
-  return { shift, opened: true };
+  return { shift, opened: true, roster };
 }
 
 /** Closes whatever is open. `by` is usually them; a manager may close another's. */
